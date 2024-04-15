@@ -12,6 +12,7 @@ configs = {}
 types = {}
 scan_then_connect_state = 'idling'
 scan_then_connect_count = 0
+scan_then_connect_latest = ""
 count = 0
 views = {}
 views_const = ["states"]
@@ -55,19 +56,21 @@ def disconnected_callback(client):
 async def scan_then_connect():
     global scan_then_connect_state
     global scan_then_connect_count
+    global scan_then_connect_latest
     global clients
     if scan_then_connect_state != 'idling':
         return
     scan_then_connect_state = 'scanning'
     bd = await BleakScanner.find_device_by_filter(filterfunc)
-    scan_then_connect_count += 1
     if bd != None:
         client = BleakClient(bd.address, disconnected_callback)
-        scan_then_connect_state = bd.address
+        scan_then_connect_state = "connecting"
         await client.connect()
         if client.is_connected:
             clients.append(client)
             await download_config(client)
+            scan_then_connect_latest = client.address
+    scan_then_connect_count += 1
     scan_then_connect_state = 'idling'
 
 def get_uid():
@@ -103,6 +106,7 @@ async def _peek(request):
     content = {}
     content['state'] = scan_then_connect_state
     content['count'] = scan_then_connect_count
+    content['latest'] = scan_then_connect_latest
     return web.Response(body=json.dumps(content))
 
 @routes.post('/discover')
@@ -110,6 +114,19 @@ async def _discover(request):
     ret = await _peek(request)
     asyncio.create_task(scan_then_connect())
     return ret
+
+@routes.post('/disconnect')
+async def _disconnect(request):
+    content = {}
+    args = json.loads(await request.content.read())
+    client = get_client(args['address'])
+    if client == None:
+        raise web.HTTPNotFound()
+    affected = 0
+    if await client.disconnect():
+        affected += 1
+    content["affected"] = affected
+    return web.Response(body=json.dumps(content))
 
 @routes.post('/config')
 async def _config(request):
