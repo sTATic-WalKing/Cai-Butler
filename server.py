@@ -60,6 +60,7 @@ async def scan_then_connect():
     global clients
     if scan_then_connect_state != 'idling':
         return
+    scan_then_connect_latest = ""
     scan_then_connect_state = 'scanning'
     bd = await BleakScanner.find_device_by_filter(filterfunc)
     if bd != None:
