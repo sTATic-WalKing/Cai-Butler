@@ -240,16 +240,26 @@ async def _autos(request):
 async def _abort(request):
     global views
     global tasks
+    global configs
     content = {}
     args = json.loads(await request.content.read())
-    uid = args['uid']
     affected = 0
-    if uid in views:
-        views.pop(uid)
-        affected += 1
-    if uid in tasks:
-        tasks[uid].cancel()
-        affected += 1
+    if 'uid' in args:
+        uid = args['uid']
+        if uid in views:
+            views.pop(uid)
+            affected += 1
+        if uid in tasks:
+            tasks[uid].cancel()
+            affected += 1
+    if 'address' in args:
+        address = args['address']
+        if address in configs:
+            client = get_client(address)
+            if client != None:
+                await client.disconnect()
+            configs.pop(address)
+            affected += 1
     content['affected'] = affected
     return web.Response(body=json.dumps(content))
 
