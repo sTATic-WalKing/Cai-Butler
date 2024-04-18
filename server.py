@@ -5,6 +5,7 @@ from bleak import BleakClient
 import json
 import time
 import functools
+import hashlib
 
 routes = web.RouteTableDef()
 clients = []
@@ -102,6 +103,35 @@ def done_callback(uid, task):
     if uid in tasks:
         tasks.pop(uid)
 
+def hash_info():
+    global configs
+    global views
+    global autos
+    related_configs = []
+    for k, v in configs.items():
+        related_config = {}
+        related_config['address'] = k
+        related_config['connected'] = v['connected']
+        related_config['state'] = v['state']
+        related_config['type'] = v['type']
+        related_configs.append(related_config)
+    related_configs.sort(key=lambda a: a['address'])
+    view_uids = list(views.keys())
+    view_uids.sort()
+    auto_uids = list(autos.keys())
+    auto_uids.sort()
+    str = json.dumps([ related_configs, view_uids, auto_uids ]).replace(' ', '')
+    hl = hashlib.md5()
+    hl.update(str.encode('utf-8'))
+    hashed = hl.hexdigest()
+    return hashed
+
+@routes.post('/ping')
+async def _ping(request):
+    content = {}
+    content['hash'] = hash_info()
+    return web.Response(body=json.dumps(content))
+
 @routes.post('/peek')
 async def _peek(request):
     content = {}
@@ -139,7 +169,7 @@ async def _config(request):
     if len(content) > 1:
         config = configs[address]
         content['type'] = config['type']
-        content['state'] = config['stte']
+        content['state'] = config['state']
         content['connected'] = get_client(address) != None
         configs[address] = content
     else:
