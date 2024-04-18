@@ -103,7 +103,7 @@ def done_callback(uid, task):
     if uid in tasks:
         tasks.pop(uid)
 
-def hash_info():
+def get_hash():
     global configs
     global views
     global autos
@@ -126,10 +126,14 @@ def hash_info():
     hashed = hl.hexdigest()
     return hashed
 
+def check_hash(args):
+    if 'hash' not in args or args['hash'] != get_hash():
+        raise web.HTTPPreconditionFailed()
+
 @routes.post('/ping')
 async def _ping(request):
     content = {}
-    content['hash'] = hash_info()
+    content['hash'] = get_hash()
     return web.Response(body=json.dumps(content))
 
 @routes.post('/peek')
@@ -193,6 +197,7 @@ async def _state(request):
     if client == None:
         raise web.HTTPNotFound()
     if 'state' in args:
+        check_hash(args)
         await upload_state(client, args['state'])
     value = await client.read_gatt_char('01010101-0101-0101-0101-010101010102')
     content['state'] = value[1]
@@ -254,6 +259,7 @@ async def _auto(request):
             raise web.HTTPNotFound()
         content = autos[uid]
     else:
+        check_hash(content)
         uid = get_uid()
         content['uid'] = uid
         if 'start' not in content:
