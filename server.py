@@ -9,13 +9,11 @@ import functools
 routes = web.RouteTableDef()
 clients = []
 configs = {}
-types = {}
 scan_then_connect_state = 'idling'
 scan_then_connect_count = 0
 scan_then_connect_latest = ""
 count = 0
 views = {}
-views_const = ["states"]
 autos = {}
 tasks = {}
 
@@ -28,18 +26,13 @@ def get_client(address):
 
 async def download_config(client):
     global configs
-    global types
     value = await client.read_gatt_char('01010101-0101-0101-0101-010101010102')
-    types[client.address] = value[0]
     if client.address not in configs:
         configs[client.address] = {}
     configs[client.address]['type'] = value[0]
+    configs[client.address]['state'] = value[1]
     configs[client.address]['address'] = client.address
-    configs[client.address]["connected"] = True
-
-async def download_state(client):
-    value = await client.read_gatt_char('01010101-0101-0101-0101-010101010102')
-    return value[1]
+    configs[client.address]['connected'] = True
 
 async def upload_state(client, state):
     await client.write_gatt_char('01010101-0101-0101-0101-010101010102', state.to_bytes(1, 'little'))
@@ -53,6 +46,12 @@ def disconnected_callback(client):
         clients.remove(client)
         configs[client.address]["connected"] = False
 
+def notify_callback(client, sender, value):
+    global configs
+    config = configs[client.address]
+    config['type'] = value[0]
+    config['state'] = value[1]
+    
 async def scan_then_connect():
     global scan_then_connect_state
     global scan_then_connect_count
@@ -70,6 +69,7 @@ async def scan_then_connect():
         if client.is_connected:
             clients.append(client)
             await download_config(client)
+            await client.start_notify("01010101-0101-0101-0101-010101010102", functools.partial(notify_callback, client))
             scan_then_connect_latest = client.address
     scan_then_connect_count += 1
     scan_then_connect_state = 'idling'
@@ -137,9 +137,11 @@ async def _config(request):
     if address not in configs:
         raise web.HTTPNotFound()
     if len(content) > 1:
-        configs[address] = content
-        content['type'] = types[address]
+        config = configs[address]
+        content['type'] = config['type']
+        content['state'] = config['stte']
         content['connected'] = get_client(address) != None
+        configs[address] = content
     else:
         content = configs[address]
     return web.Response(body=json.dumps(content))
@@ -153,14 +155,20 @@ async def _configs(request):
 
 @routes.post('/state')
 async def _state(request):
+    global configs
     content = {}
     args = json.loads(await request.content.read())
-    client = get_client(args['address'])
+    address = args['address']
+    client = get_client(address)
     if client == None:
         raise web.HTTPNotFound()
     if 'state' in args:
         await upload_state(client, args['state'])
-    content['state'] = await download_state(client)
+    value = await client.read_gatt_char('01010101-0101-0101-0101-010101010102')
+    content['state'] = value[1]
+    config = configs[address]
+    config['type'] = value[0]
+    config['state'] = value[1]
     return web.Response(body=json.dumps(content))
 
 @routes.post('/filter')
@@ -182,7 +190,6 @@ async def _filter(request):
 @routes.post('/view')
 async def _view(request):
     global views
-    global views_const
     content = json.loads(await request.content.read())
     if 'uid' in content:
         uid = content['uid']
@@ -190,9 +197,7 @@ async def _view(request):
             raise web.HTTPNotFound()
         view = views[uid]
         if len(content) > 1:
-            for k, v in view.items():
-                if k in views_const:
-                    content[k] = v
+            content['states'] = view['states']
             views[uid] = content
         else:
             content = view
