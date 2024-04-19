@@ -127,7 +127,7 @@ def get_hash():
     return hashed
 
 def check_hash(args):
-    if 'hash' not in args or args['hash'] != get_hash():
+    if 'hash' in args and args['hash'] != get_hash():
         raise web.HTTPPreconditionFailed()
 
 @routes.post('/ping')
