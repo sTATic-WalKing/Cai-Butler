@@ -8,34 +8,71 @@ import functools
 import hashlib
 import RPi.GPIO as GPIO
 import os
+import ctypes
 
-loop = asyncio.new_event_loop()
+class Chars(ctypes.Structure):
+    _fields_ = [('data', ctypes.POINTER(ctypes.c_ubyte)), ("size", ctypes.c_ulong)]
+
+rsa = ctypes.cdll.LoadLibrary("./librsa.so")
+
+rsa.generate.restype = None
+rsa.generate.argtypes = []
+
+rsa.get_pk.restype = Chars
+rsa.get_pk.argtypes = []
+
+rsa.get_sk.restype = Chars
+rsa.get_sk.argtypes = []
+
+rsa.encrypt.restype = Chars
+rsa.encrypt.argtypes = [ Chars, Chars ]
+
+rsa.decrypt.restype = Chars
+rsa.decrypt.argtypes = [ Chars, Chars ]
 
 rsa_pk = None
 rsa_sk = None
 
-# def rsa_generate():
-#     if os.path.exists('rsa_pk.pem') and os.path.exists('rsa_sk.pem'):
-#         return
-#     pass
-#     with open('rsa_pk.pem', 'wb') as f:
-#         f.write(pk)
-#     with open('rsa_sk.pem', 'wb') as f:
-#         f.write(sk)
+def rsa_generate():
+    rsa.generate()
 
-# def rsa_get():
-#     global rsa_pk
-#     global rsa_sk
-#     with open('rsa_pk.pem', 'rb') as f:
-#         rsa_pk = f.read()
-#     with open('rsa_sk.pem', 'rb') as f:
-#         rsa_sk = f.read()
+def rsa_get():
+    global rsa_pk
+    global rsa_sk
+    pk_chars = rsa.get_pk()
+    sk_chars = rsa.get_sk()
+    rsa_pk = ctypes.string_at(pk_chars.data, pk_chars.size)
+    rsa_sk = ctypes.string_at(sk_chars.data, sk_chars.size)
+    rsa.free_chars(pk_chars)
+    rsa.free_chars(sk_chars)
+    
+def rsa_encrypt(pk, plainText):
+    pk_chars = Chars()
+    pk_chars.data = (ctypes.c_ubyte * len(pk)).from_buffer(bytearray(pk))
+    pk_chars.size = len(pk)
 
-# def rsa_encrypt(pk, data):
-#     pass
+    plainText_chars = Chars()
+    plainText_chars.data = (ctypes.c_ubyte * len(plainText)).from_buffer(bytearray(plainText))
+    plainText_chars.size = len(plainText)
 
-# def rsa_decrypt(sk, data):
-#     pass
+    cipherText_chars = rsa.encrypt(pk_chars, plainText_chars)
+    ret = ctypes.string_at(cipherText_chars.data, cipherText_chars.size)
+    rsa.free_chars(cipherText_chars)
+    return ret
+
+def rsa_decrypt(sk, cipherText):
+    sk_chars = Chars()
+    sk_chars.data = (ctypes.c_ubyte * len(sk)).from_buffer(bytearray(sk))
+    sk_chars.size = len(sk)
+
+    cipherText_chars = Chars()
+    cipherText_chars.data = (ctypes.c_ubyte * len(cipherText)).from_buffer(bytearray(cipherText))
+    cipherText_chars.size = len(cipherText)
+
+    plainText_chars = rsa.decrypt(sk_chars, cipherText_chars)
+    ret = ctypes.string_at(plainText_chars.data, plainText_chars.size)
+    rsa.free_chars(plainText_chars)
+    return ret
 
 # def encode(pk, data):
 #     return rsa_encrypt(pk, json.dumps(data).encode('utf8'))
@@ -55,7 +92,7 @@ views = {}
 autos = {}
 tasks = {}
 
-async def stateUpdateAndNotify(address, state):
+async def state_update_and_notify(address, state):
     global configs
     configs[address]['state'] = state
     for auto in autos.values():
@@ -79,7 +116,7 @@ async def download_config(client):
     if client.address not in configs:
         configs[client.address] = {}
     configs[client.address]['type'] = value[0]
-    await stateUpdateAndNotify(client.address, value[1])
+    await state_update_and_notify(client.address, value[1])
     configs[client.address]['address'] = client.address
     configs[client.address]['connected'] = True
 
@@ -99,7 +136,7 @@ async def notify_callback(client, sender, value):
     global configs
     config = configs[client.address]
     config['type'] = value[0]
-    await stateUpdateAndNotify(client.address, value[1])
+    await state_update_and_notify(client.address, value[1])
     
 async def scan_then_connect():
     global scan_then_connect_state
@@ -252,7 +289,7 @@ async def _state(request):
     content['state'] = value[1]
     config = configs[address]
     config['type'] = value[0]
-    await stateUpdateAndNotify(address, value[1])
+    await state_update_and_notify(address, value[1])
     return web.Response(body=json.dumps(content))
 
 @routes.post('/filter')
@@ -396,4 +433,12 @@ app.on_startup.append(on_startup)
 app.add_routes(routes)
 
 if __name__ == '__main__':
+    rsa_generate()
+    rsa_get()
     web.run_app(app, port=11151)
+    # with open('cipherText', 'wb') as f:
+    #     plainText = '江南style'.encode('utf8')
+    #     cipherText = rsa_encrypt(rsa_pk, plainText)
+    #     f.write(cipherText)
+    #     plainText_c = rsa_decrypt(rsa_sk, cipherText)
+    #     print(plainText_c.decode('utf8'))

@@ -1,2 +1,5 @@
 rsa_pk.pem
 rsa_sk.pem
+rsa.o
+rsa.a
+librsa.so
