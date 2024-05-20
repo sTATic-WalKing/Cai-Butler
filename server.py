@@ -6,6 +6,43 @@ import json
 import time
 import functools
 import hashlib
+import RPi.GPIO as GPIO
+import os
+
+loop = asyncio.new_event_loop()
+
+rsa_pk = None
+rsa_sk = None
+
+# def rsa_generate():
+#     if os.path.exists('rsa_pk.pem') and os.path.exists('rsa_sk.pem'):
+#         return
+#     pass
+#     with open('rsa_pk.pem', 'wb') as f:
+#         f.write(pk)
+#     with open('rsa_sk.pem', 'wb') as f:
+#         f.write(sk)
+
+# def rsa_get():
+#     global rsa_pk
+#     global rsa_sk
+#     with open('rsa_pk.pem', 'rb') as f:
+#         rsa_pk = f.read()
+#     with open('rsa_sk.pem', 'rb') as f:
+#         rsa_sk = f.read()
+
+# def rsa_encrypt(pk, data):
+#     pass
+
+# def rsa_decrypt(sk, data):
+#     pass
+
+# def encode(pk, data):
+#     return rsa_encrypt(pk, json.dumps(data).encode('utf8'))
+
+# def decode(data):
+#     global rsa_sk
+#     return json.loads(rsa_decrypt(rsa_sk, data).decode('utf8'))
 
 routes = web.RouteTableDef()
 clients = []
@@ -17,6 +54,17 @@ count = 0
 views = {}
 autos = {}
 tasks = {}
+
+async def stateUpdateAndNotify(address, state):
+    global configs
+    configs[address]['state'] = state
+    for auto in autos.values():
+        if 'state' not in auto:
+            continue
+        if auto['state']['address'] != address:
+            continue
+        if auto['state']['state'] == state:
+            await apply_view(auto['view'])
 
 def get_client(address):
     global clients
@@ -31,7 +79,7 @@ async def download_config(client):
     if client.address not in configs:
         configs[client.address] = {}
     configs[client.address]['type'] = value[0]
-    configs[client.address]['state'] = value[1]
+    await stateUpdateAndNotify(client.address, value[1])
     configs[client.address]['address'] = client.address
     configs[client.address]['connected'] = True
 
@@ -47,11 +95,11 @@ def disconnected_callback(client):
         clients.remove(client)
         configs[client.address]["connected"] = False
 
-def notify_callback(client, sender, value):
+async def notify_callback(client, sender, value):
     global configs
     config = configs[client.address]
     config['type'] = value[0]
-    config['state'] = value[1]
+    await stateUpdateAndNotify(client.address, value[1])
     
 async def scan_then_connect():
     global scan_then_connect_state
@@ -121,6 +169,7 @@ def get_hash():
     auto_uids = list(autos.keys())
     auto_uids.sort()
     str = json.dumps([ related_configs, view_uids, auto_uids ]).replace(' ', '')
+    print(str)
     hl = hashlib.md5()
     hl.update(str.encode('utf-8'))
     hashed = hl.hexdigest()
@@ -203,7 +252,7 @@ async def _state(request):
     content['state'] = value[1]
     config = configs[address]
     config['type'] = value[0]
-    config['state'] = value[1]
+    await stateUpdateAndNotify(address, value[1])
     return web.Response(body=json.dumps(content))
 
 @routes.post('/filter')
@@ -262,12 +311,13 @@ async def _auto(request):
         check_hash(content)
         uid = get_uid()
         content['uid'] = uid
-        if 'start' not in content:
-            content['start'] = int(time.time())
         autos[uid] = content
-        task = asyncio.create_task(handle_auto(content))
-        task.add_done_callback(functools.partial(done_callback, uid))
-        tasks[uid] = task
+        if 'state' not in content:
+            if 'start' not in content:
+                content['start'] = int(time.time())
+            task = asyncio.create_task(handle_auto(content))
+            task.add_done_callback(functools.partial(done_callback, uid))
+            tasks[uid] = task
     return web.Response(body=json.dumps(content))
 
 @routes.post('/autos')
@@ -309,8 +359,40 @@ async def on_shutdown(app):
     while clients:
         await clients[0].disconnect()
 
+async def unsafe_mode():
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(17, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(18, GPIO.OUT)
+    GPIO.output(18, GPIO.LOW)
+    unsafe = False
+    before = True
+    current = True
+    count = 0
+    guard = 0
+    while True:
+        before = current
+        current = GPIO.input(17)
+        if unsafe:
+            guard += 1
+            if (before == True and current == False) or guard > 30:
+                unsafe = False
+                GPIO.output(18, GPIO.LOW)
+                count = 0
+        else:
+            if current == False:
+                count += 1
+            if count > 3:
+                unsafe = True
+                GPIO.output(18, GPIO.HIGH)
+                guard = 0
+        await asyncio.sleep(1)
+
+async def on_startup(app):
+    asyncio.create_task(unsafe_mode())
+
 app = web.Application()
 app.on_shutdown.append(on_shutdown)
+app.on_startup.append(on_startup)
 app.add_routes(routes)
 
 if __name__ == '__main__':
