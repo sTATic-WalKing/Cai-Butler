@@ -67,7 +67,7 @@ Chars get_sk() {
     return read_all(skLocation);
 }
 
-Chars encrypt(Chars pk, Chars plainText) {
+Chars encrypt_once(Chars pk, Chars plainText) {
     Chars ret;
 
     BIO* pkBio = BIO_new_mem_buf(pk.data, pk.size);
@@ -88,7 +88,48 @@ Chars encrypt(Chars pk, Chars plainText) {
     return ret;
 }
 
-Chars decrypt(Chars sk, Chars cipherText) {
+Chars concat(Chars a, Chars b) {
+    Chars ret;
+    if (a.size == 0) {
+        return b;
+    }
+    if (b.size == 0) {
+        return a;
+    }
+    ret.size = a.size + b.size;
+    ret.data = (unsigned char*)malloc(ret.size * sizeof(unsigned char));
+    memcpy(ret.data, a.data, a.size);
+    memcpy(ret.data + a.size, b.data, b.size);
+
+    free(a.data);
+    free(b.data);
+    
+    return ret;
+}
+
+Chars mid(Chars chars, size_t pos, size_t len) {
+    Chars ret;
+    if (pos + len > chars.size) {
+        len = chars.size - pos;
+    }
+    ret.data = chars.data + pos;
+    ret.size = len;
+    return ret;
+}
+
+Chars encrypt(Chars pk, Chars plainText) {
+    Chars ret;
+    ret.size = 0;
+    size_t unit = 128;
+    size_t left = 0;
+    do {
+        ret = concat(ret, encrypt_once(pk, mid(plainText, left, unit)));
+        left += unit;
+    } while (left < plainText.size);
+    return ret;
+}
+
+Chars decrypt_once(Chars sk, Chars cipherText) {
     Chars ret;
 
     BIO* skBio = BIO_new_mem_buf(sk.data, sk.size);
@@ -106,6 +147,18 @@ Chars decrypt(Chars sk, Chars cipherText) {
     EVP_PKEY_free(key);
     BIO_free_all(skBio);
 
+    return ret;
+}
+
+Chars decrypt(Chars sk, Chars cipherText) {
+    Chars ret;
+    ret.size = 0;
+    size_t unit = 256;
+    size_t left = 0;
+    do {
+        ret = concat(ret, decrypt_once(sk, mid(cipherText, left, unit)));
+        left += unit;
+    } while (left < cipherText.size);
     return ret;
 }
 

@@ -9,6 +9,8 @@ import hashlib
 import RPi.GPIO as GPIO
 import os
 import ctypes
+import copy
+import base64
 
 class Chars(ctypes.Structure):
     _fields_ = [('data', ctypes.POINTER(ctypes.c_ubyte)), ("size", ctypes.c_ulong)]
@@ -41,12 +43,15 @@ def rsa_get():
     global rsa_sk
     pk_chars = rsa.get_pk()
     sk_chars = rsa.get_sk()
-    rsa_pk = ctypes.string_at(pk_chars.data, pk_chars.size)
-    rsa_sk = ctypes.string_at(sk_chars.data, sk_chars.size)
+    rsa_pk = ctypes.string_at(pk_chars.data, pk_chars.size).decode('utf8')
+    rsa_sk = ctypes.string_at(sk_chars.data, sk_chars.size).decode('utf8')
     rsa.free_chars(pk_chars)
     rsa.free_chars(sk_chars)
     
 def rsa_encrypt(pk, plainText):
+    pk = pk.encode('utf8')
+    plainText = plainText.encode('utf8')
+
     pk_chars = Chars()
     pk_chars.data = (ctypes.c_ubyte * len(pk)).from_buffer(bytearray(pk))
     pk_chars.size = len(pk)
@@ -58,9 +63,13 @@ def rsa_encrypt(pk, plainText):
     cipherText_chars = rsa.encrypt(pk_chars, plainText_chars)
     ret = ctypes.string_at(cipherText_chars.data, cipherText_chars.size)
     rsa.free_chars(cipherText_chars)
-    return ret
+    
+    return base64.b64encode(ret).decode('utf8')
 
 def rsa_decrypt(sk, cipherText):
+    sk = sk.encode('utf8')
+    cipherText = base64.b64decode(cipherText)
+
     sk_chars = Chars()
     sk_chars.data = (ctypes.c_ubyte * len(sk)).from_buffer(bytearray(sk))
     sk_chars.size = len(sk)
@@ -72,14 +81,27 @@ def rsa_decrypt(sk, cipherText):
     plainText_chars = rsa.decrypt(sk_chars, cipherText_chars)
     ret = ctypes.string_at(plainText_chars.data, plainText_chars.size)
     rsa.free_chars(plainText_chars)
+    return ret.decode('utf8')
+
+def encode(pk_uid, data):
+    global whites
+    try:
+        plaintext = json.dumps(data)
+        ret = rsa_encrypt(whites[pk_uid]['pk'], plaintext)
+    except BaseException as e:
+        print('encode', e)
+        raise web.HTTPForbidden()
     return ret
 
-# def encode(pk, data):
-#     return rsa_encrypt(pk, json.dumps(data).encode('utf8'))
-
-# def decode(data):
-#     global rsa_sk
-#     return json.loads(rsa_decrypt(rsa_sk, data).decode('utf8'))
+def decode(data):
+    global rsa_sk
+    try:
+        cipherText = rsa_decrypt(rsa_sk, data)
+        ret = json.loads(cipherText)
+    except BaseException as e:
+        print('decode', e)
+        raise web.HTTPForbidden()
+    return ret
 
 routes = web.RouteTableDef()
 clients = []
@@ -91,6 +113,23 @@ count = 0
 views = {}
 autos = {}
 tasks = {}
+unsafe = False
+unsafe_count = 0
+unsafe_guard = 0
+whites = {}
+threshold = 2
+
+def unsafe_update_and_notify(value):
+    global unsafe_count
+    global unsafe_guard
+    global unsafe
+    unsafe = value
+    if unsafe:
+        GPIO.output(18, GPIO.HIGH)
+        unsafe_guard = 0
+    else:
+        GPIO.output(18, GPIO.LOW)
+        unsafe_count = 0
 
 async def state_update_and_notify(address, state):
     global configs
@@ -192,6 +231,8 @@ def get_hash():
     global configs
     global views
     global autos
+    global whites
+    global unsafe
     related_configs = []
     for k, v in configs.items():
         related_config = {}
@@ -205,8 +246,9 @@ def get_hash():
     view_uids.sort()
     auto_uids = list(autos.keys())
     auto_uids.sort()
-    str = json.dumps([ related_configs, view_uids, auto_uids ]).replace(' ', '')
-    print(str)
+    white_uids = list(whites.keys())
+    white_uids.sort()
+    str = json.dumps([ related_configs, view_uids, auto_uids, white_uids, unsafe ]).replace(' ', '')
     hl = hashlib.md5()
     hl.update(str.encode('utf-8'))
     hashed = hl.hexdigest()
@@ -218,17 +260,21 @@ def check_hash(args):
 
 @routes.post('/ping')
 async def _ping(request):
+    args = decode(await request.content.read())
     content = {}
     content['hash'] = get_hash()
-    return web.Response(body=json.dumps(content))
+    return web.Response(body=encode(args['pk_uid'], content))
 
 @routes.post('/peek')
 async def _peek(request):
+    global unsafe
+    args = decode(await request.content.read())
     content = {}
     content['state'] = scan_then_connect_state
     content['count'] = scan_then_connect_count
     content['latest'] = scan_then_connect_latest
-    return web.Response(body=json.dumps(content))
+    content['unsafe'] = unsafe
+    return web.Response(body=encode(args['pk_uid'], content))
 
 @routes.post('/discover')
 async def _discover(request):
@@ -239,7 +285,7 @@ async def _discover(request):
 @routes.post('/disconnect')
 async def _disconnect(request):
     content = {}
-    args = json.loads(await request.content.read())
+    args = decode(await request.content.read())
     client = get_client(args['address'])
     if client == None:
         raise web.HTTPNotFound()
@@ -247,16 +293,17 @@ async def _disconnect(request):
     if await client.disconnect():
         affected += 1
     content["affected"] = affected
-    return web.Response(body=json.dumps(content))
+    return web.Response(body=encode(args['pk_uid'], content))
 
 @routes.post('/config')
 async def _config(request):
     global configs
-    content = json.loads(await request.content.read())
+    args = decode(await request.content.read())
+    content = args
     address = content['address']
     if address not in configs:
         raise web.HTTPNotFound()
-    if len(content) > 1:
+    if len(content) > threshold:
         config = configs[address]
         content['type'] = config['type']
         content['state'] = config['state']
@@ -264,20 +311,21 @@ async def _config(request):
         configs[address] = content
     else:
         content = configs[address]
-    return web.Response(body=json.dumps(content))
+    return web.Response(body=encode(args['pk_uid'], content))
 
 @routes.post('/configs')
 async def _configs(request):
     global configs
+    args = decode(await request.content.read())
     content = {}
     content['addresses'] = list(configs.keys())
-    return web.Response(body=json.dumps(content))
+    return web.Response(body=encode(args['pk_uid'], content))
 
 @routes.post('/state')
 async def _state(request):
     global configs
     content = {}
-    args = json.loads(await request.content.read())
+    args = decode(await request.content.read())
     address = args['address']
     client = get_client(address)
     if client == None:
@@ -290,14 +338,14 @@ async def _state(request):
     config = configs[address]
     config['type'] = value[0]
     await state_update_and_notify(address, value[1])
-    return web.Response(body=json.dumps(content))
+    return web.Response(body=encode(args['pk_uid'], content))
 
 @routes.post('/filter')
 async def _filter(request):
     global configs
     content = {}
     content['addresses'] = []
-    args = json.loads(await request.content.read())
+    args = decode(await request.content.read())
     for address, config in configs.items():
         mark = True
         for k, v in args.items():
@@ -306,18 +354,19 @@ async def _filter(request):
                 break
         if mark:
             content['addresses'].append(address)
-    return web.Response(body=json.dumps(content))
+    return web.Response(body=encode(args['pk_uid'], content))
 
 @routes.post('/view')
 async def _view(request):
     global views
-    content = json.loads(await request.content.read())
+    args = decode(await request.content.read())
+    content = args
     if 'uid' in content:
         uid = content['uid']
         if uid not in views:
             raise web.HTTPNotFound()
         view = views[uid]
-        if len(content) > 1:
+        if len(content) > threshold:
             content['states'] = view['states']
             views[uid] = content
         else:
@@ -326,19 +375,21 @@ async def _view(request):
         uid = get_uid()
         content['uid'] = uid
         views[uid] = content
-    return web.Response(body=json.dumps(content))
+    return web.Response(body=encode(args['pk_uid'], content))
 
 @routes.post('/views')
 async def _views(request):
     global views
+    args = decode(await request.content.read())
     content = {}
     content['uids'] = list(views.keys())
-    return web.Response(body=json.dumps(content))
+    return web.Response(body=encode(args['pk_uid'], content))
 
 @routes.post('/auto')
 async def _auto(request):
     global autos
-    content = json.loads(await request.content.read())
+    args = decode(await request.content.read())
+    content = args
     if 'uid' in content:
         uid = content['uid']
         if uid not in autos:
@@ -355,14 +406,15 @@ async def _auto(request):
             task = asyncio.create_task(handle_auto(content))
             task.add_done_callback(functools.partial(done_callback, uid))
             tasks[uid] = task
-    return web.Response(body=json.dumps(content))
+    return web.Response(body=encode(args['pk_uid'], content))
 
 @routes.post('/autos')
 async def _autos(request):
     global autos
+    args = decode(await request.content.read())
     content = {}
     content['uids'] = list(autos.keys())
-    return web.Response(body=json.dumps(content))
+    return web.Response(body=encode(args['pk_uid'], content))
 
 @routes.post('/abort')
 async def _abort(request):
@@ -370,7 +422,7 @@ async def _abort(request):
     global tasks
     global configs
     content = {}
-    args = json.loads(await request.content.read())
+    args = decode(await request.content.read())
     affected = 0
     if 'uid' in args:
         uid = args['uid']
@@ -379,6 +431,9 @@ async def _abort(request):
             affected += 1
         if uid in tasks:
             tasks[uid].cancel()
+            affected += 1
+        elif uid in autos:
+            autos.pop(uid)
             affected += 1
     if 'address' in args:
         address = args['address']
@@ -389,7 +444,55 @@ async def _abort(request):
             configs.pop(address)
             affected += 1
     content['affected'] = affected
-    return web.Response(body=json.dumps(content))
+    return web.Response(body=encode(args['pk_uid'], content))
+
+@routes.post('/white')
+async def _white(request):
+    global whites
+    global unsafe
+    args = decode(await request.content.read())
+    content = args
+    uid = 0
+    if 'uid' in content:
+        uid = content['uid']
+        if uid not in whites:
+            raise web.HTTPNotFound()
+        content = copy.deepcopy(whites[uid])
+        content.pop('pk')
+    else:
+        if not unsafe:
+            raise web.HTTPForbidden()
+        uid = get_uid()
+        content['uid'] = uid
+        content['time'] = int(time.time())
+        whites[uid] = content
+    unsafe_update_and_notify(False)
+    return web.Response(body=encode(uid, content))
+
+@routes.post('/unwhite')
+async def _unwhite(request):
+    global whites
+    global unsafe
+    if not unsafe:
+        raise web.HTTPForbidden()
+    content = {}
+    args = decode(await request.content.read())
+    affected = 0
+    uid = args['uid']
+    if uid in whites:
+        affected += 1
+        whites.pop(uid)
+    content['affected'] = affected
+    unsafe_update_and_notify(False)
+    return web.Response(body=encode(args['pk_uid'], content))
+
+@routes.post('/whites')
+async def _whites(request):
+    global whites
+    args = decode(await request.content.read())
+    content = {}
+    content['uids'] = list(whites.keys())
+    return web.Response(body=encode(args['pk_uid'], content))
 
 async def on_shutdown(app):
     global clients
@@ -397,31 +500,27 @@ async def on_shutdown(app):
         await clients[0].disconnect()
 
 async def unsafe_mode():
+    global unsafe
+    global unsafe_count
+    global unsafe_guard
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(17, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(18, GPIO.OUT)
     GPIO.output(18, GPIO.LOW)
-    unsafe = False
     before = True
     current = True
-    count = 0
-    guard = 0
     while True:
         before = current
         current = GPIO.input(17)
         if unsafe:
-            guard += 1
-            if (before == True and current == False) or guard > 30:
-                unsafe = False
-                GPIO.output(18, GPIO.LOW)
-                count = 0
+            unsafe_guard += 1
+            if (before == True and current == False) or unsafe_guard > 30:
+                unsafe_update_and_notify(False)
         else:
             if current == False:
-                count += 1
-            if count > 3:
-                unsafe = True
-                GPIO.output(18, GPIO.HIGH)
-                guard = 0
+                unsafe_count += 1
+            if unsafe_count > 3:
+                unsafe_update_and_notify(True)
         await asyncio.sleep(1)
 
 async def on_startup(app):
@@ -435,10 +534,8 @@ app.add_routes(routes)
 if __name__ == '__main__':
     rsa_generate()
     rsa_get()
+    plainText = '{"pk":"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvyEefkgD+rnrI22x42bD\nKOO1RJKIj3YZTLWAUR2N/1TAx8IH+gMEG/97HKTxspXOElBQuALfVPpJN4LesVfi\nTiJHHtzcqoD6LXJn7Jg0dk5LskvcnVzWtc0ZZqMiV9W6HtmtnGhEfLT5M6PIA23e\nukmwhsv+Kg04lCPej8kSKnMs7ftUxSIXV9eTsH5cZL98OiHj9FJ/w1gPedOmAdnz\na43PvlowZnTJU8rtL204MSDXtW5cnKWrk8dQYHXkFUgasHKLgVusvAGffExw7cAo\no50EKlTkExQ+Xoj48HcWzeK/jeKXe0WvpWwJqGDPf70guGhVsHuDC2fPaHOh63uZ\nfwIDAQAB\n-----END PUBLIC KEY-----\n","pk_uid":0}'
+    cipherText = rsa_encrypt(rsa_pk, plainText)
+    plainText_c = rsa_decrypt(rsa_sk, cipherText)
+    print(plainText_c)
     web.run_app(app, port=11151)
-    # with open('cipherText', 'wb') as f:
-    #     plainText = '江南style'.encode('utf8')
-    #     cipherText = rsa_encrypt(rsa_pk, plainText)
-    #     f.write(cipherText)
-    #     plainText_c = rsa_decrypt(rsa_sk, cipherText)
-    #     print(plainText_c.decode('utf8'))
