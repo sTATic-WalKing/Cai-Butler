@@ -97,7 +97,7 @@ def encode(pk_uid, data, bSecurity):
 def decode(data, bSecurity):
     global rsa_sk
     try:
-        ret = None
+        ret = data
         if bSecurity:
             ret = rsa_decrypt(rsa_sk, data)
         ret = json.loads(ret)
