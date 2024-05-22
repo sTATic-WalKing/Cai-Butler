@@ -266,6 +266,7 @@ def get_bSecurity(request):
 
 @routes.post('/ping')
 async def _ping(request):
+    global unsafe
     bSecurity = get_bSecurity(request)
     args = decode(await request.content.read(), bSecurity)
     content = {}
@@ -485,7 +486,7 @@ async def _white(request):
         content['uid'] = uid
         content['time'] = int(time.time())
         whites[uid] = content
-    unsafe_update_and_notify(False)
+        unsafe_update_and_notify(False)
     return web.Response(body=encode(uid, content, bSecurity))
 
 @routes.post('/unwhite')
