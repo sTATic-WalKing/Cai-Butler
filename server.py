@@ -472,7 +472,7 @@ async def _white(request):
     bSecurity = get_bSecurity(request)
     args = decode(await request.content.read(), bSecurity)
     content = args
-    uid = 0
+    pk_uid = args['pk_uid']
     if 'uid' in content:
         uid = content['uid']
         if uid not in whites:
@@ -482,12 +482,12 @@ async def _white(request):
     else:
         if not unsafe:
             raise web.HTTPForbidden()
-        uid = get_uid()
-        content['uid'] = uid
+        pk_uid = get_uid()
+        content['uid'] = pk_uid
         content['time'] = int(time.time())
-        whites[uid] = content
+        whites[pk_uid] = content
         unsafe_update_and_notify(False)
-    return web.Response(body=encode(uid, content, bSecurity))
+    return web.Response(body=encode(pk_uid, content, bSecurity))
 
 @routes.post('/unwhite')
 async def _unwhite(request):
