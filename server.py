@@ -252,6 +252,7 @@ def get_hash():
     white_uids = list(whites.keys())
     white_uids.sort()
     str = json.dumps([ related_configs, view_uids, auto_uids, white_uids, unsafe ]).replace(' ', '')
+    print(str)
     hl = hashlib.md5()
     hl.update(str.encode('utf-8'))
     hashed = hl.hexdigest()
@@ -363,6 +364,8 @@ async def _filter(request):
     for address, config in configs.items():
         mark = True
         for k, v in args.items():
+            if k == 'pk_uid':
+                continue
             if k not in config or v != config[k]:
                 mark = False
                 break
